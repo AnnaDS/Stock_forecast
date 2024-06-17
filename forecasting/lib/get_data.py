@@ -2,7 +2,7 @@ import yfinance as yf
 import pandas as pd
 ## Getting stock price data
 #
-def prepPrices(price_history, n_days,  mov_avg=0, target_col='Close'):
+def prepPrices(price_history,  mov_avg=0, target_col='Close'):
         
     # Filling NaNs with the most recent values for any missing data
     prices = price_history.fillna(method='ffill')
@@ -22,7 +22,7 @@ def prepPrices(price_history, n_days,  mov_avg=0, target_col='Close'):
  
     return prices
 
-def getStockPrices(stock, n_days, mov_avg, target_col='Close'):
+def getStockPrices(stock, history_len, mov_avg, target_col='Close'):
     """
     Gets stock prices from now to N days ago and training amount will be in addition 
     to the number of days to train.
@@ -32,12 +32,12 @@ def getStockPrices(stock, n_days, mov_avg, target_col='Close'):
     ticker = yf.Ticker(stock)
 
     # Getting all price history
-    price_history = ticker.history(period=f"{n_days}d")
+    price_history = ticker.history(period=history_len)
     
     # Check on length
     #if len(price_history)<n_days+training_days+mov_avg:
     #    return pd.DataFrame(), price_history
     
-    prices=prepPrices(price_history, n_days, mov_avg, target_col)
+    prices=prepPrices(price_history, mov_avg, target_col)
 
     return price_history, prices
