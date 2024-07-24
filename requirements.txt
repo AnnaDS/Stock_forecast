@@ -2,3 +2,5 @@ pandas
 yfinance
 gdelt
 gdeltdoc
+hyperopt
+polars
