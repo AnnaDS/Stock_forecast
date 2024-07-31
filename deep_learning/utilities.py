@@ -1,0 +1,241 @@
+import seaborn as sns
+import matplotlib.pyplot as plt
+import yfinance as yf
+import pandas as pd
+from collections import namedtuple
+from visualisation import plot_multiline_chart
+
+def get_ohlc_data(tickers, start_date='2017-01-01'):
+    ohlc_data = {}
+    for ticker in tickers:
+        try:
+            stock_data = yf.download(ticker, start=start_date)
+            ohlc_data[ticker] = stock_data
+        except Exception as e:
+            print(f"Error fetching data for {ticker}: {e}")
+    return ohlc_data
+
+import numpy as np
+import scipy.stats as stats
+import pandas as pd
+
+def compute_stats(series: pd.Series, name: str):
+    stats_dict = {
+        'Name': name,
+        'Minimum': np.min(series),
+        'Q1': series.quantile(0.25),
+        'Median': np.median(series),
+        'Q3': series.quantile(0.75),
+        'Maximum': np.max(series),
+        'Range': np.ptp(series),
+        'Mean': np.mean(series),
+        'Standard deviation': np.std(series),
+        'Sum': np.sum(series),
+        'Coefficient of variation': stats.variation(series),
+        'Median Absolute Deviation': stats.median_abs_deviation(series),
+        'Kurtosis': stats.kurtosis(series),
+        'Skewness': stats.skew(series)
+    }    
+    return stats_dict
+
+
+def getWeights(d,lags):
+    # return the weights from the series expansion of the differencing operator
+    # for real orders d and up to lags coefficients
+    w=[1]
+    for k in range(1,lags):
+        w.append(-w[-1]*((d-k+1))/k)
+    w=np.array(w).reshape(-1,1) 
+    return w
+
+
+
+
+def ts_differencing(series, order, lag_cutoff):
+    # return the time series resulting from (fractional) differencing
+    # for real orders order up to lag_cutoff coefficients
+    
+    weights=getWeights(order, lag_cutoff)
+    res=0
+    for k in range(lag_cutoff):
+        res += weights[k]*series.shift(k).fillna(0)
+    return res[lag_cutoff:] 
+
+
+
+
+from itertools import product
+from visualisation import plot_acf_pacf_side_by_side
+from preprocessing import encode_labels, train_test_split, train_test_split_numpy
+import polars as pl
+from sklearn.preprocessing import MinMaxScaler
+
+class TimeSeries:
+    def __init__(self, ticker: str, date: str = '2017-01-01'):
+        self.data = get_ohlc_data([ticker],date)[ticker].reset_index()
+        self.close_price = self.data['Close'].copy()
+        self.date = self.data['Date'].copy()
+        self.ticker = ticker
+
+    def construct_returns(self):
+        self.data['Returns'] = self.data['Close'].pct_change()
+        return self
+    
+    def profitability (self, column, threshold):
+        self.data['Profitable'] = (self.data[column] > threshold).astype(int)
+        return self
+    
+    def construct_technical_indicators(self, indicators: list, windows: list):
+        for func, window in product(indicators, windows):
+            series = func(self.data, window)
+            self.data[series.name] = series
+        return self
+    
+    def lag_column(self, column, skip_lags,n_lags):
+        self.data = pl.DataFrame(self.data)
+        self.data = self.data.with_columns([pl.col(column).shift(lag).alias(f"{column}_lag{lag}") for lag in range(skip_lags, n_lags + 1)]).to_pandas()
+        return self
+
+    def acf(self, column, max_lags):
+        plot_acf_pacf_side_by_side(self.data[column], lags=max_lags).show()
+
+    def drop_columns(self,cols):
+        if isinstance(cols, str):
+            cols = [cols]
+        if not set(cols).issubset(self.data.columns):
+            print(self.data.columns)
+            raise ValueError(f"Some of the {cols} not present in the data")
+        self.data = self.data.drop(columns=cols)
+        return self
+    
+    def train_test_split(self, test_size, target, apply_min_max_scaling=False):
+        if apply_min_max_scaling:
+            scaler_input = MinMaxScaler(feature_range=(-1, 1))
+            scaler_input.fit(self.data)
+            self.data = scaler_input.transform(self.data)
+            self.training_data = train_test_split_numpy(data=self.data,test_size=test_size)
+        else:
+            self.training_data = train_test_split(data=self.data,test_size=test_size,y_name=target)
+        return self
+
+    def encode_labels(self, columns_start_with: str):
+        self.data = self.data.dropna()
+        self.data = encode_labels(self.data, [column for column in self.data.columns if column.startswith(columns_start_with)])
+        return self
+    
+    def shift_column(self, column, n_shifts, drop_nulls):
+        if n_shifts > 0:
+            suffix = 'Lagged'
+        else:
+            suffix = 'Ahead'       
+        self.data[f"{column}_{suffix}_{abs(n_shifts)}"] = self.data[column].shift(n_shifts)
+        if drop_nulls:
+            self.data = self.data.dropna()
+        return self
+    
+    def add_index(self):
+        self.data = self.data.reset_index()
+        return self
+
+    def plot_correlation_matrix(self):        
+        plt.figure(figsize=(10,10))
+        sns.heatmap(self.data.dropna().corr(), annot=True, cmap='coolwarm', fmt='.2f', linewidths=2)
+        plt.show()
+        return self
+    
+    def dropna(self):
+        self.data = self.data.dropna()
+        return self
+
+    def get_reshaped_X_for_LSTM (self, which_data, min_max_scale=False):
+        if min_max_scale:
+            scaler_input = MinMaxScaler(feature_range=(-1, 1))
+            scaler_input.fit(self.training_data.x_train)
+            if which_data == 'train':
+                return np.expand_dims(scaler_input.transform(self.training_data.x_train), axis=1)
+            else:
+                return np.expand_dims(scaler_input.transform(self.training_data.x_test), axis=1)
+        if which_data == 'train':
+            return np.expand_dims(self.training_data.x_train, axis=1)
+        else:
+            return np.expand_dims(self.training_data.x_test, axis=1)
+    
+    def plot(self):
+        return plot_multiline_chart([(self.date, self.close_price, self.ticker)],f"Daily Close ({self.ticker})", 'Date', 'Close')
+
+
+ 
+        
+    @property
+    def input_feature_shape (self):
+        return 1, self.training_data.x_train.shape[1]
+
+def min_max_scale(time_series, which_data='x'):
+    scaler_input = MinMaxScaler(feature_range=(-1, 1))
+    if which_data == 'x':
+        scaler_input.fit(time_series.training_data.x_train)
+        return scaler_input.transform(time_series.training_data.x_train), scaler_input.transform(time_series.training_data.x_test)
+    else:
+        y_train = time_series.training_data.y_train.reshape(len(time_series.training_data.y_train), 1)
+        y_test= time_series.training_data.y_test.reshape(len(time_series.training_data.y_test), 1)
+        scaler_input.fit(y_train)
+        return scaler_input.transform(y_train), scaler_input.transform(y_test)
+
+
+
+
+from tsfresh.feature_extraction import feature_calculators
+import numpy as np
+from tsfresh.feature_extraction import feature_calculators
+
+def calculate_summary_statistics(time_series):
+    """
+    Calculate summary statistics for the given time series.
+
+    Parameters:
+    - time_series (list or array-like): The input time series.
+
+    Returns:
+    - dict: A dictionary containing summary statistics.
+    """
+
+    # Absolute Sum of Changes
+    abs_sum_of_changes = feature_calculators.absolute_sum_of_changes(time_series)
+    abs_max = feature_calculators.absolute_maximum(time_series)
+    # Descriptive Statistics on Autocorrelation
+    autocorrelation = feature_calculators.autocorrelation(time_series, lag=100)
+
+    # Approximate Entropy
+    approximate_entropy = feature_calculators.approximate_entropy(time_series, m=30, r=0.7 * np.std(time_series))
+
+    # ADF Statistic (Augmented Dickey-Fuller test)
+    adf_statistic = feature_calculators.augmented_dickey_fuller(time_series, param=[{"attr": "pvalue", "autolag": "AIC"}])
+
+    # Create a dictionary to store the results
+    summary_stats = {
+        "Abs Maximum": abs_max,
+        'Abs Sum of Changes': abs_sum_of_changes,
+        'Autocorrelation': autocorrelation,
+        'Approximate Entropy': approximate_entropy,
+        'ADF Stat (p Value)': adf_statistic
+    }
+
+    return summary_stats
+def inverse_transform_predictions (ticker: TimeSeries, preds: np.ndarray):
+    scaler_input = MinMaxScaler(feature_range=(-1, 1))
+    scaler_input.fit(ticker.training_data.y_train.reshape(len(ticker.training_data.y_train), 1))
+    return scaler_input.inverse_transform(preds.reshape(-1, 1)).flatten()
+
+
+def get_actual_and_predicted (ticker: TimeSeries, model):
+    actual_and_predicted = namedtuple('ActualAndPredicted', ['actual', 'predicted'])
+    preds = model.model.predict(ticker.get_reshaped_X_for_LSTM(which_data='test', min_max_scale=True)).flatten()
+    true = ticker.training_data.y_test
+    return actual_and_predicted(true, inverse_transform_predictions(ticker,preds))
+
+def plot_actual_vs_predicted (ticker: TimeSeries, model, title):
+    preds = model.model.predict(ticker.get_reshaped_X_for_LSTM(which_data='test', min_max_scale=True)).flatten()
+    true = ticker.training_data.y_test
+    idx = range(len(preds))
+    from visualisation import plot_multiline_chart
+    plot_multiline_chart([(idx, inverse_transform_predictions(ticker, preds), "Predicted"), (idx, true, 'Actual')], title, 'Index', 'Price')
